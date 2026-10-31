@@ -183,6 +183,7 @@ jobs:
             -w /src \
             debian:bullseye-slim \
             sh -c '
+              apt update
               apt install -y git
               set -eu
               git config --global --add safe.directory /src
