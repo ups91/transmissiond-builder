@@ -1,0 +1,339 @@
+name: Linux native builds
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - "main"
+    tags:
+      - "v*"
+
+  schedule:
+    - cron: "33 4 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: transmissiond-native-builds
+  cancel-in-progress: false
+
+jobs:
+
+  # ============================================================================
+  # Detect latest stable Transmission version
+  # ============================================================================
+
+  detect:
+    name: Detect Transmission version
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+
+    outputs:
+      tag: ${{ steps.detect.outputs.tag }}
+      ver: ${{ steps.detect.outputs.ver }}
+      build_ts: ${{ steps.detect.outputs.build_ts }}
+      source_sha: ${{ steps.detect.outputs.source_sha }}
+      transmissiond_sha: ${{ steps.detect.outputs.transmissiond_sha }}
+      skip: ${{ steps.detect.outputs.skip }}
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Detect latest stable Transmission version
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Official Transmission repository.
+          TRANSMISSION_REPO="https://github.com/transmission/transmission.git"
+
+          read -r TRANSMISSION_TAG TRANSMISSIOND_SHA < <(
+            git ls-remote --tags --refs "${TRANSMISSION_REPO}" |
+              awk '$2 ~ /^refs\/tags\/v?[0-9]+\.[0-9]+\.[0-9]+$/ {
+                name = $2
+                sub(/^refs\/tags\//, "", name)
+                print name, $1
+              }' |
+              sort -k1,1V |
+              tail -n 1
+          )
+
+          if [ -z "${TRANSMISSION_TAG:-}" ] || [ -z "${TRANSMISSIOND_SHA:-}" ]; then
+            echo "ERROR: Unable to detect latest stable Transmission release."
+            exit 1
+          fi
+
+          echo "Selected Transmission tag: ${TRANSMISSION_TAG}"
+          echo "Transmission tag commit SHA: ${TRANSMISSIOND_SHA}"
+
+
+          PACKAGE_VERSION=$(
+            printf '%s\n' "${TRANSMISSION_TAG}" |
+              grep -oE '[0-9]+\.[0-9]+\.[0-9]+'
+          )
+
+          echo "Selected Transmission package version: ${PACKAGE_VERSION}"
+
+          BUILD_TS=$(date -u +%Y%m%d%H%M)
+          echo "Build timestamp: ${BUILD_TS}"
+
+          # Record the exact source commit of this workflow run.
+          SOURCE_SHA=$(git rev-parse HEAD)
+          echo "Source commit: ${SOURCE_SHA}"
+
+          echo "tag=${TRANSMISSION_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "ver=${PACKAGE_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "build_ts=${BUILD_TS}" >> "${GITHUB_OUTPUT}"
+          echo "source_sha=${SOURCE_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "transmissiond_sha=${TRANSMISSIOND_SHA}" >> "${GITHUB_OUTPUT}"
+
+          # Check whether this Transmission version was already build.
+          EXISTING_RELEASE=$(
+            git ls-remote \
+              --exit-code \
+              --refs \
+              origin \
+              "refs/tags/${TRANSMISSION_TAG}" || true
+          )
+
+          if [ -n "${EXISTING_RELEASE}" ]; then
+            echo "NOTICE: Transmission ${TRANSMISSION_TAG} already exists."
+            echo "Skipping all builds."
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          echo "No existing release found."
+          echo "skip=false" >> "${GITHUB_OUTPUT}"
+
+
+  # ============================================================================
+  # Build deb packages
+  # ============================================================================
+
+  build:
+
+    name: Build ${{ matrix.arch }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    needs:
+      - detect
+
+    if: needs.detect.outputs.skip != 'true'
+
+    strategy:
+      fail-fast: true
+      max-parallel: 2
+
+      matrix:
+        include:
+          - arch: i386
+            platform: linux/386
+
+          - arch: arm64
+            platform: linux/arm64
+
+          - arch: armv7
+            platform: linux/arm/v7
+
+    steps:
+
+      - name: Checkout build scripts
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.detect.outputs.source_sha }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: 386,arm,arm64
+
+      - name: Clone Transmission source
+        shell: bash
+        env:
+          TRANSMISSION_TAG: ${{ needs.detect.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          git clone \
+            --branch "${TRANSMISSION_TAG}" \
+            --recurse-submodules \
+            https://github.com/transmission/transmission.git \
+            Transmission
+
+      - name: Build deb
+        shell: bash
+        env:
+          PACKAGE_VERSION: ${{ needs.detect.outputs.ver }}-${{ needs.detect.outputs.build_ts }}
+          TARGET_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            --platform "${TARGET_PLATFORM}" \
+            -e "PACKAGE_VERSION=${PACKAGE_VERSION}" \
+            -e "BUILD_JOBS=1" \
+            -v "${GITHUB_WORKSPACE}:/src" \
+            -w /src \
+            debian:bullseye-slim \
+            sh -c '
+              set -eu
+              git config --global --add safe.directory /src
+              git config --global --add safe.directory /src/Transmission
+              cd /src/Transmission
+              sh /src/build.sh
+            '
+
+      - name: Collect packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          shopt -s nullglob
+          PACKAGES=(Transmission/outputs/transmissiond_*.deb)
+
+          if [ "${#PACKAGES[@]}" -eq 0 ]; then
+            echo "ERROR: No packages were generated."
+            exit 1
+          fi
+
+          cp "${PACKAGES[@]}" .
+
+          echo "Collected packages:"
+          ls -lh transmissiond_*.deb
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: transmissiond-${{ matrix.arch }}-${{ needs.detect.outputs.ver }}
+          path: transmissiond_*.deb
+          if-no-files-found: error
+          retention-days: 3
+
+
+  # ============================================================================
+  # Create release commit, Git tag and GitHub Release
+  # ============================================================================
+
+  release:
+
+    name: Create GitHub Release
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    needs:
+      - detect
+      - build
+
+    if: needs.detect.outputs.skip != 'true' && needs.build.result == 'success'
+
+    permissions:
+      contents: write
+
+    steps:
+
+      - name: Checkout release branch
+        uses: actions/checkout@v4
+        with:
+          ref: release
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download all built packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: transmissiond-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Update build information and push release commit
+        id: create-tag
+        shell: bash
+        env:
+          TAG_NAME: ${{ needs.detect.outputs.tag }}
+          PACKAGE_VERSION: ${{ needs.detect.outputs.ver }}
+          BUILD_TS: ${{ needs.detect.outputs.build_ts }}
+          SOURCE_SHA: ${{ needs.detect.outputs.source_sha }}
+          TRANSMISSIOND_SHA: ${{ needs.detect.outputs.transmissiond_sha }}
+        run: |
+          set -euo pipefail
+
+          RELEASE_BRANCH="release"
+          INFO_FILE="transmission-build-info.txt"
+
+          echo "Transmission tag: ${TAG_NAME}"
+          echo "Package version: ${PACKAGE_VERSION}"
+          echo "Source commit: ${SOURCE_SHA}"
+          echo "Remote repository HEAD SHA: ${TRANSMISSIOND_SHA}"
+
+          # Configure Git identity.
+          git config user.name "gh[bot]"
+          git config user.email "gh[bot]@users.noreply.github.com"
+
+          # Verify release branch.
+          CURRENT_BRANCH=$(git branch --show-current)
+
+          if [ "${CURRENT_BRANCH}" != "${RELEASE_BRANCH}" ]; then
+            echo "ERROR: Expected release branch, got ${CURRENT_BRANCH}"
+            exit 1
+          fi
+
+          # Verify that the source commit exists in the checkout.
+          git cat-file -e "${SOURCE_SHA}^{commit}"
+
+          # Verify that the target tag does not already exist.
+          if git ls-remote --exit-code --refs origin "refs/tags/${TAG_NAME}" >/dev/null 2>&1; then
+            echo "ERROR: Tag ${TAG_NAME} already exists."
+            exit 1
+          fi
+
+          # Create build information file.
+          cat > "${INFO_FILE}" <<EOF
+          transmission_version=${PACKAGE_VERSION}
+          transmission_tag=${TAG_NAME}
+          source_commit=${SOURCE_SHA}
+          transmissiond_sha=${TRANSMISSIOND_SHA}
+          build_timestamp_utc=${BUILD_TS}
+          EOF
+
+          echo "Build information:"
+          cat "${INFO_FILE}"
+
+          # Commit build information.
+          git add "${INFO_FILE}"
+
+          git commit \
+            -m "Build Transmission ${TAG_NAME}" \
+            -m "Source commit: ${SOURCE_SHA}"
+
+          RELEASE_SHA=$(git rev-parse HEAD)
+
+          echo "Release commit: ${RELEASE_SHA}"
+
+          # Create annotated Git tag pointing to release commit.
+          git tag -a "${TAG_NAME}" \
+            -m "Transmission ${TAG_NAME}"
+
+          # Push release branch and tag atomically.
+          git push --atomic origin \
+            "HEAD:refs/heads/${RELEASE_BRANCH}" \
+            "refs/tags/${TAG_NAME}"
+
+          echo "release_sha=${RELEASE_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "tag_name=${TAG_NAME}" >> "${GITHUB_OUTPUT}"
+
+          echo "Release commit and tag pushed successfully."
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.create-tag.outputs.tag_name }}
+          files: release-assets/*.deb
+          generate_release_notes: false
+          fail_on_unmatched_files: true
