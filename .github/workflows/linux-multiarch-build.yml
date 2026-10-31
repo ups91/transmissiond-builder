@@ -27,7 +27,7 @@ jobs:
 
   detect:
     name: Detect Transmission version
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
 
     outputs:
@@ -119,7 +119,7 @@ jobs:
   build:
 
     name: Build ${{ matrix.arch }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
 
     needs:
@@ -181,7 +181,7 @@ jobs:
             -e "BUILD_JOBS=1" \
             -v "${GITHUB_WORKSPACE}:/src" \
             -w /src \
-            debian:bullseye-slim \
+            debian:trixie-slim \
             sh -c '
               apt update
               apt install -y git
@@ -226,7 +226,7 @@ jobs:
   release:
 
     name: Create GitHub Release
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     needs:
