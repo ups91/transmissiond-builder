@@ -120,7 +120,7 @@ jobs:
 
     name: Build ${{ matrix.arch }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 180
 
     needs:
       - detect
@@ -129,7 +129,7 @@ jobs:
 
     strategy:
       fail-fast: true
-      max-parallel: 2
+      max-parallel: 3
 
       matrix:
         include:
@@ -198,7 +198,7 @@ jobs:
           set -euo pipefail
 
           shopt -s nullglob
-          PACKAGES=(Transmission/outputs/transmissiond_*.deb)
+          PACKAGES=(Transmission/dist/transmissiond-*.deb)
 
           if [ "${#PACKAGES[@]}" -eq 0 ]; then
             echo "ERROR: No packages were generated."
@@ -208,13 +208,13 @@ jobs:
           cp "${PACKAGES[@]}" .
 
           echo "Collected packages:"
-          ls -lh transmissiond_*.deb
+          ls -lh transmissiond-*.deb
 
       - name: Upload packages
         uses: actions/upload-artifact@v4
         with:
           name: transmissiond-${{ matrix.arch }}-${{ needs.detect.outputs.ver }}
-          path: transmissiond_*.deb
+          path: transmissiond-*.deb
           if-no-files-found: error
           retention-days: 3
 

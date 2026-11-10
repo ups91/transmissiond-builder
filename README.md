@@ -2,6 +2,8 @@
 Pre build most resent transmissiond packages for uncommon platforms
 # TransmissionD — builds for Less Common Platforms
 
+This repository provides scripts and configurations for building **TransmissionD** BitTorrent daemon for uncommon and resource-constrained platforms, with a focus on ARM64, ARMv7, and other architectures not officially supported by upstream releases.
+
 ## Overview
 
 This repository provides build scripts, configuration files, and build-related resources for compiling **TransmissionD** for less common and resource-constrained hardware platforms that may not be fully covered by the official project's prebuilt releases.
@@ -43,7 +45,7 @@ Build targets are selected according to hardware availability, toolchain compati
 |---|---|---|
 | Linux ARM64 | AArch64 / 64-bit ARM | Target |
 | Linux ARMv7 | 32-bit ARM | Target |
-| Linux MIPS | MIPS / MIPS32 / MIPS64, as applicable | Experimental |
+| Linux MIPS | MIPS / MIPS32 / MIPS64, as applicable | Potential future support |
 | Other platforms | Depends on feasibility | Potential future support |
 
 A listed target does not necessarily imply that a working binary is already available. Actual build status and runtime compatibility should be verified for each release.
