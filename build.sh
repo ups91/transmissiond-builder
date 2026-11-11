@@ -35,7 +35,7 @@ set -eu
 # CONFIGURATION
 # ==============================================================================
 
-SRC_DIR=${SRC_DIR:-.} # it MUST be transmissiond src directory
+SRC_DIR=${SRC_DIR:-.} # transmissiond src directory
 PACKAGE_VERSION=${PACKAGE_VERSION:-0.0.0+local}
 MAINTAINER=${MAINTAINER:-"ups<ups91@ukr.net>"}
 BUILD_JOBS=${BUILD_JOBS:-1}
@@ -87,28 +87,30 @@ validate_boolean STRIP_BINARIES "${STRIP_BINARIES}"
 validate_boolean CLEAN_BUILD "${CLEAN_BUILD}"
 
 # ==============================================================================
-# PATHS AND ARCHITECTURE
+# BUILD ENVIRONMENT
 # ==============================================================================
 
-echo "=== STEP 1: Preparing build environment ==="
+echo "=== Preparing build environment ==="
 
+# Validate the source directory and switch to its absolute path.
 if [ ! -d "${SRC_DIR}" ]; then
-    die "Source directory does not exist: ${SRC_DIR}"
+    die "Transmission source directory not found: ${SRC_DIR}"
 fi
 
 cd "${SRC_DIR}"
 SRC_DIR=$(pwd -P)
 
+# Check the tools required for package management and architecture detection.
 for tool in id dpkg dpkg-deb dpkg-query; do
     require_command "${tool}"
 done
 
-# Validate Debian package version syntax.
+# Validate the Debian package version.
 if ! dpkg --validate-version "${PACKAGE_VERSION}" >/dev/null 2>&1; then
     die "Invalid Debian package version: ${PACKAGE_VERSION}"
 fi
 
-# Detect the architecture of the current system.
+# Detect the target architecture from the current Debian system.
 ARCH=$(dpkg --print-architecture)
 
 if [ -z "${ARCH}" ]; then
@@ -116,8 +118,9 @@ if [ -z "${ARCH}" ]; then
 fi
 
 echo "Target architecture: ${ARCH}"
+echo "Package version: ${PACKAGE_VERSION}"
 
-# Define absolute paths for working directories.
+# Define the architecture-specific build directory.
 BUILD_DIR="${SRC_DIR}/build-${ARCH}"
 
 if [ "${CLEAN_BUILD}" -eq 1 ]; then
@@ -126,8 +129,7 @@ fi
 
 mkdir -p "${BUILD_DIR}"
 
-
-# Debian package name.
+# Define the Debian package name and output directory.
 PKG_NAME="transmissiond-systemd-${ARCH}"
 
 OUTPUT_DIR="${SRC_DIR}/dist/"
@@ -138,12 +140,12 @@ OUTPUT_DIR=$(pwd -P)
 cd "${SRC_DIR}"
 
 # ==============================================================================
-# DEPENDENCIES
+# BUILD DEPENDENCIES
 # ==============================================================================
 
-echo "=== STEP 2: Checking build tools ==="
+echo "=== Checking build dependencies ==="
 
-# Install dependencies if enabled in the configuration.
+# Install the required build tools and development libraries when enabled.
 if [ "${INSTALL_DEPS}" -eq 1 ]; then
 
     if [ "$(id -u)" -ne 0 ]; then
@@ -173,10 +175,10 @@ if [ "${INSTALL_DEPS}" -eq 1 ]; then
         zlib1g-dev
 
 else
-    echo "INSTALL_DEPS=0: skipping dependency installation"
+    echo "Dependency installation disabled (INSTALL_DEPS=0)"
 fi
 
-# Verify all required tools after dependency installation.
+# Verify that all tools required by the remaining build stages are available.
 for tool in \
     id \
     dpkg \
@@ -203,12 +205,11 @@ do
     require_command "${tool}"
 done
 
-
 # ==============================================================================
 # CMAKE CONFIGURATION
 # ==============================================================================
 
-echo "=== STEP 4: Configuring CMake ==="
+echo "=== Configuring CMake ==="
 
 cmake -S "${SRC_DIR}" -B "${BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE=Release \
@@ -224,116 +225,126 @@ cmake -S "${SRC_DIR}" -B "${BUILD_DIR}" \
 # BUILD
 # ==============================================================================
 
-echo "=== STEP 5: Building Transmission ==="
+echo "=== Building Transmission ==="
 
 cmake --build "${BUILD_DIR}" --parallel "${BUILD_JOBS}"
 
 # ==============================================================================
-# TEMPORARY WORKSPACE
+# TEMPORARY PACKAGE WORKSPACE
 # ==============================================================================
 
-echo "=== STEP 6: Preparing temporary workspace ==="
+echo "=== Preparing temporary package workspace ==="
 
-# Создаём уникальный временный каталог внутри OUTPUT_DIR; XXXXXX — шаблон для mktemp.
+# Create a unique temporary directory inside the build directory.
 WORK_DIR=$(mktemp -d "${BUILD_DIR}/.transmission-build-${ARCH}.XXXXXX")
-    if [ -z "${WORK_DIR}" ] || [ ! -d "${WORK_DIR}" ]; then
-       die "Failed to create tmp BUILD_DIR (${WORK_DIR})"
-    fi
-# Определяем путь к корню будущего Debian-пакета — структура каталогов, которая попадёт в .deb.
+
+if [ -z "${WORK_DIR}" ] || [ ! -d "${WORK_DIR}" ]; then
+    die "Failed to create temporary build workspace: ${WORK_DIR}"
+fi
+
+# Define the staging directory for the future Debian package.
 PKG_ROOT="${WORK_DIR}/pkg-root"
 
-# Создаём корневой каталог пакета, чтобы cmake --install было куда устанавливать файлы.
 mkdir -p "${PKG_ROOT}"
 
 # ==============================================================================
-# INSTALL COMPILED FILES
+# INSTALL BUILD OUTPUT
 # ==============================================================================
+
+echo "=== Installing compiled files into package staging directory ==="
 
 DESTDIR="${PKG_ROOT}" cmake --install "${BUILD_DIR}"
 
-
-
 # ==============================================================================
-# VERIFY BINARIES
+# ELF VALIDATION
 # ==============================================================================
 
-echo "=== STEP 8: Validating ELF files ==="
+echo "=== Identifying ELF binaries ==="
 
-# Задаём путь к временному файлу, в который соберём список всех ELF-бинарников из пакета.
+# Collect all ELF files installed in the package staging directory.
 ELF_LIST="${WORK_DIR}/elf-files.txt"
-
 : > "${ELF_LIST}"
 
-# Ищем все обычные файлы в корне пакета и для каждого запускаем file, чтобы отфильтровать только ELF.
 find "${PKG_ROOT}" -type f -exec file {} \; | awk -F: '/: ELF/ {print $1}' > "${ELF_LIST}"
 
 if [ ! -s "${ELF_LIST}" ]; then
-    die "No ELF files found in package root"
+    die "No ELF files found in package staging directory"
 fi
+
 # ==============================================================================
-# STRIP
+# BINARY STRIPPING
 # ==============================================================================
+
 if [ "${STRIP_BINARIES}" -eq 1 ]; then
-    echo "=== Stripping binaries ==="
+    echo "=== Stripping ELF binaries ==="
     while IFS= read -r f; do
         strip --strip-unneeded "$f" 2>/dev/null
     done < "${ELF_LIST}"
 else
-    echo "STRIP_BINARIES=0: skipping strip"
+    echo "Binary stripping disabled (STRIP_BINARIES=0)"
 fi
-
-
-
-
 
 # ==============================================================================
 # RUNTIME DEPENDENCIES
 # ==============================================================================
 
-echo "=== STEP 9: Detecting runtime dependencies ==="
-RUNTIME_DEPS_FILE="${WORK_DIR}/runtime-deps.txt" # Файл для накопления имён Debian-пакетов с необходимыми библиотеками.
-: > "${RUNTIME_DEPS_FILE}" # Очищаем файл, чтобы исключить данные от предыдущих операций.
+echo "=== Detecting runtime dependencies ==="
 
-while IFS= read -r bin; do # Последовательно обрабатываем каждый ELF-файл из списка.
+# Collect Debian package names providing the required shared libraries.
+RUNTIME_DEPS_FILE="${WORK_DIR}/runtime-deps.txt"
+: > "${RUNTIME_DEPS_FILE}"
 
-    if ! readelf -d "${bin}" 2>/dev/null | grep -q '(NEEDED)'; then # Проверяем, есть ли у ELF динамические зависимости.
-        continue # Пропускаем статически скомпонованные файлы и файлы без динамических библиотек.
+# Process each ELF file and resolve its dynamic library dependencies.
+while IFS= read -r bin; do
+
+    # Skip ELF files without dynamic dependencies.
+    if ! readelf -d "${bin}" 2>/dev/null | grep -q '(NEEDED)'; then
+        continue
     fi
 
-    # Get list of dynamically linked libraries for this binary.
-    # The awk script prints absolute paths of resolved libraries and exits 1 if any are missing.
+    # Resolve shared library paths and detect missing dependencies.
     BIN_LIBS=$(ldd "${bin}" 2>&1 | awk '
         /not found/ { failed = 1 }
         $2 == "=>" && $3 ~ /^\// { print $3 }
         $1 ~ /^\// { print $1 }
         END { if (failed) exit 1 }
-    ') || die "Unable to resolve runtime dependencies: ${bin}"
+    ') || die "Unable to resolve runtime dependencies for: ${bin}"
 
-    # Process each library individually.
+    # Identify the Debian package owning each resolved library.
     for library in ${BIN_LIBS}; do
-        REAL_LIBRARY=$(readlink -f "${library}") || die "Cannot resolve library: ${library}"
-        [ -f "${REAL_LIBRARY}" ] || die "Runtime library does not exist: ${REAL_LIBRARY}"
-        OWNER=$(dpkg-query -S "${REAL_LIBRARY}" 2>/dev/null | sed -n '1s/: .*//p') || die "Cannot determine package owner: ${REAL_LIBRARY}"
-        [ -n "${OWNER}" ] || die "No Debian package owns library: ${REAL_LIBRARY}"
+        REAL_LIBRARY=$(readlink -f "${library}") || die "Cannot resolve library path: ${library}"
+        if [ ! -f "${REAL_LIBRARY}" ]; then
+            die "Runtime library not found: ${REAL_LIBRARY}"
+        fi
+
+        OWNER=$(dpkg-query -S "${REAL_LIBRARY}" 2>/dev/null | sed -n '1s/: .*//p') || die "Cannot determine Debian package owner: ${REAL_LIBRARY}"
+        if [ -z "${OWNER}" ]; then
+            die "No Debian package owns runtime library: ${REAL_LIBRARY}"
+        fi
+
         printf '%s\n' "${OWNER%%:*}" >> "${RUNTIME_DEPS_FILE}"
     done
 
-done < "${ELF_LIST}" # Завершаем обработку всех ELF-файлов.
+done < "${ELF_LIST}"
 
+# Remove duplicate package names and prepare the Debian Depends field.
+if [ ! -s "${RUNTIME_DEPS_FILE}" ]; then
+    die "Unable to determine runtime dependencies"
+fi
 
-[ -s "${RUNTIME_DEPS_FILE}" ] || die "Unable to determine runtime dependencies" # Проверяем, что удалось обнаружить хотя бы одну зависимость.
+RUNTIME_DEPS=$(sort -u "${RUNTIME_DEPS_FILE}" | paste -sd ',' -)
 
-RUNTIME_DEPS=$(sort -u "${RUNTIME_DEPS_FILE}" | paste -sd ',' -) # Удаляем дубликаты и формируем строку Depends для Debian.
+if [ -z "${RUNTIME_DEPS}" ]; then
+    die "Runtime dependency list is empty"
+fi
 
-[ -n "${RUNTIME_DEPS}" ] || die "Runtime dependency list is empty" # Проверяем, что итоговая строка зависимостей не пуста.
-
-echo "Runtime dependencies: ${RUNTIME_DEPS}" # Выводим обнаруженные зависимости для контроля.
+echo "Detected runtime dependencies: ${RUNTIME_DEPS}"
 
 # ==============================================================================
 # DEBIAN CONTROL FILES
 # ==============================================================================
 
-echo "=== STEP 10: Creating Debian control files ==="
+echo "=== Creating Debian package metadata ==="
 
 mkdir -p "${PKG_ROOT}/DEBIAN"
 
@@ -349,8 +360,10 @@ Description: BitTorrent client (transmission-daemon and CLI) built for ${ARCH}
 EOF
 
 # ==============================================================================
-# POSTINST
+# POST-INSTALLATION SCRIPT
 # ==============================================================================
+
+echo "=== Creating post-installation script ==="
 
 cat > "${PKG_ROOT}/DEBIAN/postinst" <<'EOF'
 #!/bin/sh
@@ -387,8 +400,10 @@ exit 0
 EOF
 
 # ==============================================================================
-# PRERM
+# PRE-REMOVAL SCRIPT
 # ==============================================================================
+
+echo "=== Creating pre-removal script ==="
 
 cat > "${PKG_ROOT}/DEBIAN/prerm" <<'EOF'
 #!/bin/sh
@@ -417,8 +432,10 @@ exit 0
 EOF
 
 # ==============================================================================
-# POSTRM
+# POST-REMOVAL SCRIPT
 # ==============================================================================
+
+echo "=== Creating post-removal script ==="
 
 cat > "${PKG_ROOT}/DEBIAN/postrm" <<'EOF'
 #!/bin/sh
@@ -432,6 +449,7 @@ fi
 exit 0
 EOF
 
+# Set permissions for Debian maintainer scripts and control metadata.
 chmod 755 \
     "${PKG_ROOT}/DEBIAN/postinst" \
     "${PKG_ROOT}/DEBIAN/prerm" \
@@ -440,21 +458,22 @@ chmod 755 \
 chmod 644 "${PKG_ROOT}/DEBIAN/control"
 
 # ==============================================================================
-# BUILD DEB PACKAGE
+# DEB PACKAGE CREATION
 # ==============================================================================
 
-echo "=== STEP 11: Building Debian package ==="
+echo "=== Building Debian package ==="
 
 TEMP_DEB="${WORK_DIR}/${PKG_NAME}_${PACKAGE_VERSION}_${ARCH}.deb"
 
 dpkg-deb --build --root-owner-group "${PKG_ROOT}" "${TEMP_DEB}"
 
 # ==============================================================================
-# FINAL VALIDATION
+# PACKAGE VALIDATION
 # ==============================================================================
 
-echo "=== STEP 12: Validating Debian package ==="
+echo "=== Validating Debian package ==="
 
+# Verify package metadata and archive contents.
 dpkg-deb --info "${TEMP_DEB}" >/dev/null
 dpkg-deb --contents "${TEMP_DEB}" >/dev/null
 
@@ -474,13 +493,14 @@ if [ "${PACKAGE_VERSION_CHECK}" != "${PACKAGE_VERSION}" ]; then
     die "Unexpected package version: ${PACKAGE_VERSION_CHECK}"
 fi
 
+# Ensure the main Transmission daemon executable is included.
 if ! dpkg-deb --contents "${TEMP_DEB}" |
     grep -Fq './usr/bin/transmission-daemon'
 then
     die "transmission-daemon is missing from the Debian package"
 fi
 
-# Extract control archive to validate maintainer scripts.
+# Extract and verify Debian maintainer scripts.
 CONTROL_CHECK_DIR="${WORK_DIR}/control-check"
 
 mkdir -p "${CONTROL_CHECK_DIR}"
@@ -499,42 +519,50 @@ for script in postinst prerm postrm; do
 
 done
 
-# Move the package to its final destination only after successful validation.
+# ==============================================================================
+# FINAL PACKAGE
+# ==============================================================================
 
+echo "=== Installing validated package into output directory ==="
+
+# Publish the package only after all validation checks have passed.
 FINAL_DEB="${OUTPUT_DIR}/${PKG_NAME}_${PACKAGE_VERSION}_${ARCH}.deb"
 
 mv -f "${TEMP_DEB}" "${FINAL_DEB}"
 
 # ==============================================================================
-# SUCCESS
+# BUILD SUMMARY
 # ==============================================================================
 
 echo "============================================================"
-echo "SUCCESS: ${FINAL_DEB}"
-echo "Package: ${PKG_NAME}"
-echo "Version: ${PACKAGE_VERSION}"
-echo "Architecture: ${ARCH}"
+echo "BUILD COMPLETED SUCCESSFULLY"
+echo "------------------------------------------------------------"
+echo "Package file:        ${FINAL_DEB}"
+echo "Package name:        ${PKG_NAME}"
+echo "Package version:     ${PACKAGE_VERSION}"
+echo "Target architecture: ${ARCH}"
 echo "Runtime dependencies: ${RUNTIME_DEPS}"
 echo "============================================================"
 
 # ==============================================================================
-# SYSTEM CLEANUP
+# CLEANUP
 # ==============================================================================
 
+echo "=== Cleaning up build environment ==="
+
 if [ "${CLEAN_BUILD}" -eq 0 ]; then
-    echo "CLEAN_BUILD=0: preserving CMake build directory"
+    echo "Build directory preserved: ${BUILD_DIR}"
 else
     rm -rf "${BUILD_DIR}"
-    echo "CLEAN_BUILD=1: CMake build directory was removed"
+    echo "Build directory removed: ${BUILD_DIR}"
 fi
 
 if [ "${INSTALL_DEPS}" -eq 1 ]; then
     apt-get autoremove -y --purge
-    echo "APT cleanup : autoremove"
+    echo "Unused APT packages removed"
 else
-    echo "INSTALL_DEPS=0: skipping APT cleanup"
+    echo "APT cleanup skipped (INSTALL_DEPS=0)"
 fi
 
-echo "=== BUILD COMPLETED ==="
-
+echo "=== All build stages completed ==="
 exit 0

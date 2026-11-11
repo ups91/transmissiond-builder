@@ -22,7 +22,6 @@ This project is based on the original **[TransmissionD](https://github.com/trans
 
 All builds and modifications originate from the upstream project. This repository is intended to complement the original project by providing additional build support for specific architectures and environments, rather than replacing or independently developing the upstream software.
 
-Upstream repository: [TransmissionD on GitHub](https://github.com/)
 
 ## Repository Contents
 
@@ -65,7 +64,5 @@ In general, the build process consists of:
 ## Disclaimer
 
 This is an independent, community-oriented build repository. It is not necessarily affiliated with, endorsed by, or maintained by the upstream TransmissionD developers.
-
-Platform-specific builds may have limitations or require additional configuration. Compatibility depends on the target CPU, Linux distribution, libc implementation, kernel environment, and available dependencies.
 
 Please refer to the upstream project for the original source code, official documentation, and licensing information.
