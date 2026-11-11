@@ -1,0 +1,5 @@
+transmission_version=4.1.4
+transmission_tag=4.1.4
+source_commit=737d639f32aadab8dc002f48cfb2e60cbd17b356
+transmissiond_sha=a6d907d9ea2313143af714d7830feb6c1b60b84c
+build_timestamp_utc=202611102058
